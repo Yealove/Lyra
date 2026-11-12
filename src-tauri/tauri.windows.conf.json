@@ -1,0 +1,12 @@
+{
+  "bundle": {
+    "windows": {
+      "wix": {
+        "language": "zh-CN"
+      },
+      "nsis": {
+        "languages": ["SimpChinese"]
+      }
+    }
+  }
+}
