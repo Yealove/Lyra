@@ -4,6 +4,16 @@
 
 Tauri 2 + Rust 音频引擎，前端原生 HTML/CSS/JS（无构建链）。
 
+## 截图
+
+| 曲库 · 专辑视图 | 歌词 · 全屏黑胶 |
+|:---:|:---:|
+| ![专辑视图](assets/screenshot-library.png) | ![歌词全屏](assets/screenshot-lyrics.png) |
+
+| 歌词 · 多源选择 |
+|:---:|
+| ![歌词多源选择](assets/screenshot-lyrics-source.png) |
+
 ## 特性
 
 **播放**
@@ -68,3 +78,5 @@ vendor/rodio      上游 rodio 补丁（保持直通路径必需，勿删）
 ## 协议
 
 MIT
+
+> 截图中的专辑封面版权归原作者及唱片公司所有，仅作界面演示用途。
