@@ -1,0 +1,16 @@
+# 构建产物
+node_modules/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# 系统与编辑器
+.DS_Store
+*.log
+.idea/
+.vscode/
+.claude/
+.codebuddy/
+
+# 内部文档与设计素材（不随仓库分发）
+docs/
+渐变流光音乐图标.png

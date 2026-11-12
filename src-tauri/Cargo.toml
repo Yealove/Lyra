@@ -1,0 +1,40 @@
+[package]
+name = "lyra"
+version = "0.1.0"
+description = "好好听歌"
+edition = "2021"
+
+# 二进制名决定 macOS 下进程/ Dock 显示名（未打包的 dev 模式没有 Info.plist，
+# 系统直接取可执行文件名）。中文 target 名 cargo 支持，故直接用它当显示名。
+[[bin]]
+name = "好好听歌"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rodio = { version = "0.20", features = ["symphonia-all", "symphonia-alac"] }
+lofty = "0.22"
+rusqlite = { version = "0.32", features = ["bundled"] }
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["time"] }
+notify = "6"
+souvlaki = "0.7"
+filetime = "0.2"
+rand = "0.8"
+# 高质量 sinc 重采样（替代 rodio 线性插值，Hi-Res/变速场景保真）
+rubato = "0.16"
+
+[profile.release]
+strip = true
+lto = true
+
+# 本地补丁版 rodio：修复 ReadSeekSource::byte_len 返回 None 导致
+# symphonia FLAC/MP4 demuxer seek 永远 Unseekable 的问题
+[patch.crates-io]
+rodio = { path = "../vendor/rodio" }
