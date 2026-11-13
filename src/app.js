@@ -270,7 +270,7 @@ function vAlbums() {
   return `<div class="h-row"><h1>${state.search ? '搜索' : '专辑'}</h1><span class="sub">${state.search ? `${list.length} 张专辑` : list.length + ' 张专辑'}</span></div>
   ${songs}
   <div class="grid">${list.map(a => `<div class="album-card" data-key="${enc(a.album_key)}" onclick="go('album','${enc(a.album_key)}')"><div class="cv-wrap">${cover(a.cover, a.album, 150)}
-    <div class="img-ovl" onclick="event.stopPropagation();fetchAlbumCovers('${enc(a.album_key)}')">获取</div></div>
+    <div class="img-ovl" onclick="event.stopPropagation();coverSourceDialog('album','${enc(a.album_key)}')">获取</div></div>
     <div class="album-meta"><div class="t">${esc(a.album)}</div>
     <div class="a">${esc(fmtArtists(a.artist))}${a.year ? ' · ' + a.year : ''}</div>
     <div class="a">${sbadge(a.source)} · ${a.track_count} 首</div></div></div>`).join('')}</div>`;
@@ -284,7 +284,7 @@ function vAlbum() {
   if (!a) return '<div class="empty">专辑不存在</div>';
   const ts = albumTracks(a.album_key);
   const discs = [...new Set(ts.map(t => t.disc))];
-  return `<div class="detail-head" data-key="${enc(a.album_key)}"><div class="cv-wrap">${cover(a.cover, a.album, 184)}<div class="img-ovl" onclick="fetchAlbumCovers('${enc(a.album_key)}')">获取封面</div></div>
+  return `<div class="detail-head" data-key="${enc(a.album_key)}"><div class="cv-wrap">${cover(a.cover, a.album, 184)}<div class="img-ovl" onclick="coverSourceDialog('album','${enc(a.album_key)}')">设置封面</div></div>
    <div style="flex:1;min-width:0;padding-bottom:4px">
     <div class="kicker">专辑${discs.length > 1 ? ` · ${discs.length} CD` : ''}</div>
     <h1 style="display:flex;align-items:center;gap:10px">${esc(a.album)}</h1>
@@ -341,7 +341,7 @@ function vArtists() {
       ? `<img class="avatar big" src="${artistImgSrc(img)}" loading="lazy" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='grid'"><div class="avatar big" style="${cstyle(n)};display:none">${n.slice(0, 2)}</div>`
       : `<div class="avatar big" style="${cstyle(n)}">${n.slice(0, 2)}</div>`;
     return `<div class="artist-card" onclick="go('artist','${enc(n)}')">
-      <div class="cv-wrap round">${av}<div class="img-ovl" onclick="event.stopPropagation();fetchArtistPack('${enc(n)}')">获取</div></div>
+      <div class="cv-wrap round">${av}<div class="img-ovl" onclick="event.stopPropagation();coverSourceDialog('artist','${enc(n)}')">获取</div></div>
       <div class="nm">${esc(n)}</div><div class="ct">${st.albums.size} 张专辑 · ${st.cnt} 首</div></div>`;
   }).join('')}</div>`;
 }
@@ -351,7 +351,7 @@ function vArtist() {
   const als = L.albums.filter(a => a.artist === n || artistsOf(a.artist).includes(n));
   const top = L.tracks.filter(t => artistsOf(t.artist).includes(n)).slice(0, 6);
   return `<div id="artistHero" data-artist="${esc(n)}" class="artist-hero">
-    <div class="cv-wrap round"><div class="avatar big" style="${cstyle(n)}">${n.slice(0, 2)}</div><div class="img-ovl" onclick="fetchArtistPack('${enc(n)}')">获取</div></div>
+    <div class="cv-wrap round"><div class="avatar big" style="${cstyle(n)}">${n.slice(0, 2)}</div><div class="img-ovl" onclick="coverSourceDialog('artist','${enc(n)}')">设置头像</div></div>
     <div class="ah-body"><h1>${esc(n)}</h1>
     <div class="ah-meta">${als.length} 张专辑 · ${top.length} 首热门</div>
     <div class="ah-info" id="ahInfo"></div></div></div>
@@ -360,7 +360,7 @@ function vArtist() {
   ${top.map((t, k) => trow(t, { no: k + 1 })).join('')}</div>` : ''}
   <div class="nav-h" style="padding-left:0;margin-top:22px">专辑</div>
   <div class="grid">${als.map(a => `<div class="album-card" data-key="${enc(a.album_key)}" onclick="go('album','${enc(a.album_key)}')"><div class="cv-wrap">${cover(a.cover, a.album, 150)}
-    <div class="img-ovl" onclick="event.stopPropagation();fetchAlbumCovers('${enc(a.album_key)}')">获取</div></div>
+    <div class="img-ovl" onclick="event.stopPropagation();coverSourceDialog('album','${enc(a.album_key)}')">获取</div></div>
     <div class="album-meta"><div class="t">${esc(a.album)}</div><div class="a">${a.year || '—'} · ${a.track_count} 首</div></div></div>`).join('')}</div>`;
 }
 // 在线获取面板：各渠道结果分区展示，用户自由选择采用
@@ -614,7 +614,7 @@ function vPlaylist() {
   const p = L.playlists.find(x => x.id === state.playlistId);
   if (!p) return '<div class="empty">歌单不存在</div>';
   return `<div class="detail-head">
-   <div class="collage" id="plCollage"></div>
+   <div class="cv-wrap"><div class="collage" id="plCollage"></div><div class="img-ovl" onclick="coverSourceDialog('playlist','${p.id}')">设置封面</div></div>
    <div style="flex:1;min-width:0;padding-bottom:4px">
     <div class="kicker">歌单</div><h1 style="display:flex;align-items:center;gap:10px">${esc(p.name)}</h1>
     <div class="meta" id="plMeta">加载中…</div>
@@ -630,12 +630,17 @@ async function loadPlaylistView() {
   if (!p || state.view !== 'playlist') return;
   const ts = await invoke('playlist_detail', { pid: p.id });
   p._tracks = ts;
-  const covers = ts.slice(0, 4);
-  plCollage.innerHTML = Array.from({ length: 4 }, (_, i) => {
-    const t = covers[i];
-    return `<div class="cell">${t && t.cover ? `<img src="${convertFileSrc(t.cover)}">` : (t ? esc(t.album.slice(0, 2)) : '')}</div>`;
-  }).join('');
-  plMeta.textContent = `${ts.length} 首 · ${fmt(ts.reduce((n, t) => n + t.duration, 0))} · 前 4 首封面拼贴${plEditing ? ' · 编辑模式（拖动排序 · ✕ 移出）' : ''}`;
+  if (p.cover) {
+    // 自定义封面：单图铺满整个拼贴框
+    plCollage.innerHTML = `<div class="cell" style="grid-column:1/3;grid-row:1/3"><img src="${convertFileSrc(p.cover)}"></div>`;
+  } else {
+    const covers = ts.slice(0, 4);
+    plCollage.innerHTML = Array.from({ length: 4 }, (_, i) => {
+      const t = covers[i];
+      return `<div class="cell">${t && t.cover ? `<img src="${convertFileSrc(t.cover)}">` : (t ? esc(t.album.slice(0, 2)) : '')}</div>`;
+    }).join('');
+  }
+  plMeta.textContent = `${ts.length} 首 · ${fmt(ts.reduce((n, t) => n + t.duration, 0))}${p.cover ? ' · 自定义封面' : ' · 前 4 首封面拼贴'}${plEditing ? ' · 编辑模式（拖动排序 · ✕ 移出）' : ''}`;
   // 编辑模式：拖拽排序 + 移出；普通模式与专辑页一致（trow：点击播放 + 行尾操作按钮）
   const grip = '<svg width="14" height="14" viewBox="0 0 24 24" fill="var(--tx2)"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>';
   plTracks.innerHTML = `<div class="tlist-h"><span>#</span><span>标题${plEditing ? '（拖动排序）' : ''}</span><span>艺人</span><span>时长</span></div>` +
@@ -1837,26 +1842,108 @@ async function fetchAlbumCovers(keyEnc) {
   let r;
   try { r = await invoke('fetch_album_covers', { albumKey: key, baseUrl: trSrcUrl() || null }); }
   catch (e) { closeModal(); toast(String(e), 'err'); return; }
-  const urls = r.covers || [];
-  const status = r.status || [];
+  renderCoverPicker(r.covers || [], r.status || [], '选择专辑封面',
+    `applyAlbumCoverConfirm('${enc(key)}')`, '下载入库，专辑内全部曲目同步');
+}
+// 封面候选 → 选择网格弹窗（专辑/歌单共用；选中写 selCover，#cvApply 调 applyCall 片段）
+function renderCoverPicker(urls, status, title, applyCall, applyHint) {
   const statLine = (status || []).map(s => `<span class="src-st ${s.n ? 'ok' : 'bad'}">${esc(s.src)}：${s.skipped ? '未配置' : (s.n ? s.n + ' 张' : '无结果/失败')}</span>`).join('　');
   if (!urls.length) {
-    modal('选择专辑封面', `<p class="muted">各渠道均无结果</p><p style="margin-top:8px">${statLine}</p>`,
+    modal(title, `<p class="muted">各渠道均无结果</p><p style="margin-top:8px">${statLine}</p>`,
       '<button class="btn" onclick="closeModal()">关闭</button>');
     return;
   }
   const groups = {};
   urls.forEach(x => { (groups[x.src] = groups[x.src] || []).push(x.url); });
-  modal('选择专辑封面',
+  modal(title,
     `<div id="cvPreview" class="cv-preview"><span class="muted" style="font-size:12px">点击下方封面选中并预览</span></div>
      <p class="muted" style="margin:6px 0 4px">${statLine}</p>` +
     Object.entries(groups).map(([src, list]) => `
     <div class="pack-src">${esc(src)} <span class="pg-cnt">${list.length} 张</span></div>
     <div class="cover-grid">${list.map(u => `
       <div class="cv-item"><img src="${u}" loading="lazy" onload="this.closest('.cv-item').querySelector('.cv-dim').textContent=this.naturalWidth+'×'+this.naturalHeight" onclick="pickCover('${u}',this)"><div class="cv-dim"></div></div>`).join('')}</div>`).join('')
-    + `<p class="muted" style="margin-top:10px">点击选中并预览，确认后应用（下载入库，专辑内全部曲目同步）</p>`,
+    + `<p class="muted" style="margin-top:10px">点击选中并预览，确认后应用（${applyHint}）</p>`,
     `<button class="btn" onclick="closeModal()">取消</button>
-     <button class="btn pri" id="cvApply" disabled onclick="applyAlbumCoverConfirm('${enc(key)}')">确认应用</button>`);
+     <button class="btn pri" id="cvApply" disabled onclick="${applyCall}">确认应用</button>`);
+}
+
+/* ================= 封面来源选择：本地图片 / 网络搜索（专辑·歌手·歌单） ================= */
+function coverSourceDialog(kind, arg) {
+  const titles = { album: '设置专辑封面', artist: '设置歌手头像', playlist: '设置歌单封面' };
+  const pl = kind === 'playlist' ? L.playlists.find(x => x.id === Number(arg)) : null;
+  modal(titles[kind] || '设置封面',
+    `<p class="muted" style="padding:4px 0 10px">选择封面来源：</p>
+     <div style="display:flex;gap:12px;justify-content:center;padding:6px 0 12px">
+       <button class="btn pri" style="min-width:140px" onclick="coverLocal('${kind}','${arg}')">本地图片</button>
+       <button class="btn" style="min-width:140px" onclick="coverSearch('${kind}','${arg}')">网络搜索</button>
+     </div>` +
+    (pl && pl.cover ? `<div style="text-align:center"><button class="btn sm" onclick="applyPlaylistCover('${arg}','')">清除封面（恢复拼贴）</button></div>` : ''),
+    '<button class="btn" onclick="closeModal()">取消</button>');
+}
+function coverSearch(kind, arg) {
+  if (kind === 'album') fetchAlbumCovers(arg);
+  else if (kind === 'artist') fetchArtistPack(arg);
+  else fetchPlaylistCovers(arg);
+}
+async function coverLocal(kind, arg) {
+  let p;
+  try { p = await invoke('pick_image_file'); } catch (e) { toast(String(e), 'err'); return; }
+  if (!p) return; // 用户取消选择
+  if (kind === 'album') { selCover = p; closeModal(); applyAlbumCoverConfirm(arg); }
+  else if (kind === 'artist') artistImgLocal(arg, p);
+  else applyPlaylistCover(arg, p);
+}
+async function artistImgLocal(nEnc, path) {
+  const n = decodeURIComponent(nEnc);
+  const localVal = 'local:' + path;
+  try {
+    await invoke('set_artist_field', { name: n, field: 'img', value: localVal });
+    state.artistImgs[n] = localVal;
+    closeModal();
+    // 与 applyArtistImgConfirm 相同的局部刷新（hero + 列表卡片头像原地替换）
+    const heroAv = document.querySelector('#artistHero .avatar');
+    if (heroAv) heroAv.outerHTML = `<img class="avatar big" src="${artistImgSrc(localVal)}" alt="">`;
+    document.querySelectorAll('.artist-card').forEach(card => {
+      if (card.querySelector('.nm')?.textContent === n) {
+        const old = card.querySelector('.avatar');
+        if (old && old.tagName === 'DIV') old.outerHTML = `<img class="avatar big" src="${artistImgSrc(localVal)}" loading="lazy">`;
+        else if (old) old.src = artistImgSrc(localVal);
+      }
+    });
+    loadArtistHero();
+    toast('头像已应用', 'ok');
+  } catch (e) { toast(String(e), 'err'); }
+}
+async function fetchPlaylistCovers(pidEnc) {
+  const pid = Number(pidEnc);
+  const kw = (L.playlists.find(x => x.id === pid) || {}).name || '';
+  modal('网络搜索歌单封面', `<div class="lyr-loading"><span class="spin"></span>正在并行查询：自定义源 / Deezer / Last.fm / iTunes…（关键词：${esc(kw)}）</div>`,
+    '<button class="btn" onclick="closeModal()">取消</button>');
+  let r;
+  try { r = await invoke('fetch_keyword_covers', { keyword: kw, baseUrl: trSrcUrl() || null }); }
+  catch (e) { closeModal(); toast(String(e), 'err'); return; }
+  renderCoverPicker(r.covers || [], r.status || [], '选择歌单封面',
+    `applyPlaylistCoverConfirm('${pid}')`, '下载入库，仅作为歌单封面');
+}
+async function applyPlaylistCoverConfirm(pidEnc) {
+  if (!selCover) return;
+  applyPlaylistCover(pidEnc, selCover);
+}
+async function applyPlaylistCover(pidEnc, url) {
+  const btn = document.getElementById('cvApply');
+  if (btn) { btn.disabled = true; btn.textContent = '应用中…'; }
+  try {
+    const newPath = await invoke('set_playlist_cover', { pid: Number(pidEnc), url: url || null });
+    selCover = null;
+    closeModal();
+    toast(newPath ? '歌单封面已应用' : '自定义封面已清除', 'ok');
+    const p = L.playlists.find(x => x.id === Number(pidEnc));
+    if (p) p.cover = newPath || null;
+    if (state.view === 'playlist' && state.playlistId === Number(pidEnc)) loadPlaylistView();
+  } catch (e) {
+    toast(String(e), 'err');
+    if (btn) { btn.disabled = false; btn.textContent = '确认应用'; }
+  }
 }
 async function applyAlbumCoverConfirm(keyEnc) {
   if (!selCover) return;

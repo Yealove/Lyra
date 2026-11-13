@@ -942,27 +942,15 @@ async fn import_m3u8(app: AppHandle, db: State<'_, Mutex<Db>>) -> Result<serde_j
     Ok(serde_json::json!({ "name": name, "matched": matched, "missing": missing, "total": total }))
 }
 
-/// 专辑封面候选：自定义源优先 + iTunes 兜底
-#[tauri::command]
-async fn fetch_album_covers(
-    app: AppHandle,
-    db: State<'_, Mutex<Db>>,
-    album_key: String,
+/// 多渠道并行搜封面候选（自定义源 / Deezer / Last.fm / iTunes），专辑与歌单关键词搜索共用
+async fn gather_cover_candidates(
+    app: &AppHandle,
+    artist: &str,
+    album: &str,
     base_url: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let (artist, album) = {
-        let g = db.lock().unwrap();
-        g.0
-            .query_row(
-                "SELECT COALESCE(NULLIF(album_artist,''), artist), MIN(album) FROM tracks WHERE album_key=?1 GROUP BY album_key",
-                [&album_key],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-            )
-            .map_err(|e| e.to_string())?
-    };
-    // 各渠道并行收集（面板按源分组展示；每源返回状态，失败原因可见）
-    let keys = read_cfg(&app)["keys"].clone();
-    let a1 = artist.clone(); let al1 = album.clone();
+) -> (Vec<(String, String)>, Vec<serde_json::Value>) {
+    let keys = read_cfg(app)["keys"].clone();
+    let a1 = artist.to_string(); let al1 = album.to_string();
     let base1 = base_url.clone().filter(|s| !s.trim().is_empty());
     let t_custom = tokio::task::spawn(async move {
         match base1 {
@@ -971,17 +959,17 @@ async fn fetch_album_covers(
             None => vec![],
         }
     });
-    let a2 = artist.clone(); let al2 = album.clone();
+    let a2 = artist.to_string(); let al2 = album.to_string();
     let t_deezer = tokio::task::spawn(async move {
         provider::search_deezer_art(&a2, &al2).await.unwrap_or_default()
     });
-    let a3 = artist.clone(); let al3 = album.clone();
+    let a3 = artist.to_string(); let al3 = album.to_string();
     let lf = keys["lastfm"].as_str().unwrap_or("").trim().to_string();
     let t_lastfm = tokio::task::spawn(async move {
         if lf.is_empty() { return vec![]; }
         provider::search_lastfm_art(&a3, &al3, &lf).await.unwrap_or_default()
     });
-    let a4 = artist.clone(); let al4 = album.clone();
+    let a4 = artist.to_string(); let al4 = album.to_string();
     let t_itunes = tokio::task::spawn(async move {
         provider::search_album_art(&a4, &al4).await.unwrap_or_default()
     });
@@ -1001,36 +989,93 @@ async fn fetch_album_covers(
     status.push(serde_json::json!({ "src": "iTunes", "n": it.len() }));
     for u in it { urls.push(("iTunes".into(), u)); }
     urls.dedup();
+    (urls, status)
+}
+
+/// 专辑封面候选：自定义源优先 + iTunes 兜底
+#[tauri::command]
+async fn fetch_album_covers(
+    app: AppHandle,
+    db: State<'_, Mutex<Db>>,
+    album_key: String,
+    base_url: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let (artist, album) = {
+        let g = db.lock().unwrap();
+        g.0
+            .query_row(
+                "SELECT COALESCE(NULLIF(album_artist,''), artist), MIN(album) FROM tracks WHERE album_key=?1 GROUP BY album_key",
+                [&album_key],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .map_err(|e| e.to_string())?
+    };
+    let (urls, status) = gather_cover_candidates(&app, &artist, &album, base_url).await;
     Ok(serde_json::json!({
         "covers": urls.into_iter().map(|(src, url)| serde_json::json!({ "src": src, "url": url })).collect::<Vec<_>>(),
         "status": status,
     }))
 }
 
-/// 应用专辑封面：下载（含 data:base64）入缓存 → 更新该专辑全部曲目
+/// 歌单封面候选：以歌单名为关键词搜各渠道
 #[tauri::command]
-async fn apply_album_cover(app: AppHandle, db: State<'_, Mutex<Db>>, album_key: String, url: String) -> Result<String, String> {
-    let bytes: Vec<u8> = if let Some(b64) = url.strip_prefix("data:") {
-        let payload = b64.split(",").nth(1).unwrap_or("");
-        base64_decode(payload).ok_or("data URL 解码失败")?
-    } else {
-        reqwest::get(&url)
+async fn fetch_keyword_covers(
+    app: AppHandle,
+    keyword: String,
+    base_url: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let (urls, status) = gather_cover_candidates(&app, &keyword, &keyword, base_url).await;
+    Ok(serde_json::json!({
+        "covers": urls.into_iter().map(|(src, url)| serde_json::json!({ "src": src, "url": url })).collect::<Vec<_>>(),
+        "status": status,
+    }))
+}
+
+/// 封面字节来源：data:base64 / http(s) 下载 / 本地文件路径（本地选图）
+async fn cover_bytes_from_url(url: &str) -> Result<Vec<u8>, String> {
+    if let Some(b64) = url.strip_prefix("data:") {
+        base64_decode(b64.split(",").nth(1).unwrap_or("")).ok_or_else(|| "data URL 解码失败".into())
+    } else if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(reqwest::get(url)
             .await
             .map_err(|e| format!("下载失败: {e}"))?
             .bytes()
             .await
             .map_err(|e| e.to_string())?
-            .to_vec()
-    };
-    let ext = if url.contains(".png") { "png" } else { "jpg" };
+            .to_vec())
+    } else {
+        std::fs::read(url).map_err(|e| format!("读取本地图片失败: {e}"))
+    }
+}
+
+/// 封面文件扩展名：data: PNG 显式识别，其余按路径扩展名（webp/gif 保留），兜底 jpg
+fn cover_ext(url: &str) -> String {
+    if url.starts_with("data:image/png") {
+        return "png".into();
+    }
+    match std::path::Path::new(url).extension().and_then(|e| e.to_str()) {
+        Some(e) if ["png", "webp", "gif"].contains(&e.to_lowercase().as_str()) => e.to_lowercase(),
+        _ => "jpg".into(),
+    }
+}
+
+/// 封面字节 → hash 命名写入 covers 缓存，返回绝对路径
+fn store_cover(app: &AppHandle, bytes: &[u8], ext: &str) -> Result<String, String> {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     use std::hash::Hasher;
-    h.write(&bytes);
+    h.write(bytes);
     let name = format!("{:016x}.{}", h.finish(), ext);
-    let dir = db::covers_dir(&app);
+    let dir = db::covers_dir(app);
     let path = dir.join(&name);
-    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-    let path_str = path.to_string_lossy().into_owned();
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// 应用专辑封面：下载 / 本地图片入缓存 → 更新该专辑全部曲目
+#[tauri::command]
+async fn apply_album_cover(app: AppHandle, db: State<'_, Mutex<Db>>, album_key: String, url: String) -> Result<String, String> {
+    let bytes = cover_bytes_from_url(&url).await?;
+    let path_str = store_cover(&app, &bytes, &cover_ext(&url))?;
     let n = {
         let g = db.lock().unwrap();
         g.0
@@ -1051,6 +1096,41 @@ async fn apply_album_cover(app: AppHandle, db: State<'_, Mutex<Db>>, album_key: 
     };
     auto_backup(&db, &app, "cover", &album_name);
     Ok(path_str)
+}
+
+/// 弹系统文件选择框选图片（jpg/png/webp/gif/bmp），返回绝对路径；取消返回 None
+#[tauri::command]
+async fn pick_image_file(app: AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let file = app
+        .dialog()
+        .file()
+        .add_filter("图片", &["jpg", "jpeg", "png", "webp", "gif", "bmp"])
+        .blocking_pick_file()?;
+    file.as_path().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// 设置歌单封面：下载 / 本地图片入缓存 → 写 playlists.cover（空=恢复拼贴）
+#[tauri::command]
+async fn set_playlist_cover(app: AppHandle, db: State<'_, Mutex<Db>>, pid: i64, url: Option<String>) -> Result<String, String> {
+    let path_str = match url {
+        Some(u) if !u.trim().is_empty() => {
+            let bytes = cover_bytes_from_url(&u).await?;
+            Some(store_cover(&app, &bytes, &cover_ext(&u))?)
+        }
+        _ => None,
+    };
+    let name = {
+        let g = db.lock().unwrap();
+        let nm: Option<String> = g
+            .0
+            .query_row("SELECT name FROM playlists WHERE id=?1", [pid], |r| r.get(0))
+            .ok();
+        db::set_playlist_cover(&g.0, pid, path_str.as_deref());
+        nm.ok_or("歌单不存在")?
+    };
+    auto_backup(&db, &app, "playlist", &name);
+    Ok(path_str.unwrap_or_default())
 }
 
 // ================= 自动备份（操作级快照，最多保留 10 份） =================
@@ -2259,13 +2339,24 @@ fn clean_covers(app: AppHandle, db: State<'_, Mutex<Db>>, dry_run: Option<bool>)
     let dir = db::covers_dir(&app);
     let used: std::collections::HashSet<String> = {
         let g = db.lock().unwrap();
-        g.0.prepare("SELECT DISTINCT cover FROM tracks WHERE cover IS NOT NULL")
+        let mut set: std::collections::HashSet<String> = g
+            .0
+            .prepare("SELECT DISTINCT cover FROM tracks WHERE cover IS NOT NULL")
             .and_then(|mut s| {
                 Ok(s.query_map([], |r| r.get::<_, String>(0))?
                     .filter_map(|x| x.ok())
                     .collect())
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // 歌单自定义封面同样占用缓存，清理时不误删
+        if let Ok(mut s) = g.0.prepare("SELECT DISTINCT cover FROM playlists WHERE cover IS NOT NULL") {
+            if let Ok(rows) = s.query_map([], |r| r.get::<_, String>(0)) {
+                for p in rows.flatten() {
+                    set.insert(p);
+                }
+            }
+        }
+        set
     };
     let mut removed = 0usize;
     let mut freed = 0u64;
@@ -3228,6 +3319,9 @@ fn main() {
             import_m3u8,
             fetch_album_covers,
             apply_album_cover,
+            fetch_keyword_covers,
+            pick_image_file,
+            set_playlist_cover,
             get_position,
             get_lyrics,
             fetch_online_lyrics,

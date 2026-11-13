@@ -47,6 +47,7 @@ pub struct Album {
 pub struct Playlist {
     pub id: i64,
     pub name: String,
+    pub cover: Option<String>,
     pub count: i64,
 }
 
@@ -97,6 +98,8 @@ pub fn open(path: &PathBuf) -> Connection {    let conn = Connection::open(path)
     }
     // 隐藏曲目（cue 整轨等长音频）：所有列表不展示，设置里可查看/恢复
     conn.execute("ALTER TABLE tracks ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0", []).ok();
+    // 歌单自定义封面（本地图片或网络图入库后的路径）；NULL=用前 4 首曲目拼贴
+    conn.execute("ALTER TABLE playlists ADD COLUMN cover TEXT", []).ok();
     // 歌词含翻译标记（列表"译"徽标）：首次加列时回填全库
     if conn
         .execute("ALTER TABLE tracks ADD COLUMN has_tr INTEGER NOT NULL DEFAULT 0", [])
@@ -426,6 +429,7 @@ CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_key, disc, track_no,
 CREATE TABLE IF NOT EXISTS playlists(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
+  cover TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -560,7 +564,7 @@ pub fn albums(conn: &Connection) -> Vec<Album> {
 
 pub fn playlists(conn: &Connection) -> Vec<Playlist> {
     conn.prepare(
-        "SELECT p.id, p.name, COUNT(pt.track_id) FROM playlists p
+        "SELECT p.id, p.name, p.cover, COUNT(pt.track_id) FROM playlists p
          LEFT JOIN playlist_tracks pt ON pt.playlist_id=p.id
          GROUP BY p.id ORDER BY p.created_at",
     )
@@ -569,7 +573,8 @@ pub fn playlists(conn: &Connection) -> Vec<Playlist> {
         Ok(Playlist {
             id: r.get(0)?,
             name: r.get(1)?,
-            count: r.get(2)?,
+            cover: r.get(2)?,
+            count: r.get(3)?,
         })
     })
     .unwrap()
@@ -592,6 +597,19 @@ pub fn playlist_tracks(conn: &Connection, pid: i64) -> Vec<Track> {
 }
 
 // —— 歌单写操作 ——
+/// 设置歌单封面（covers 缓存内的绝对路径；空=恢复拼贴）
+pub fn set_playlist_cover(conn: &Connection, pid: i64, cover: Option<&str>) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    conn.execute(
+        "UPDATE playlists SET cover=?1, updated_at=?2 WHERE id=?3",
+        rusqlite::params![cover, now, pid],
+    )
+    .unwrap();
+}
+
 pub fn create_playlist(conn: &Connection, name: &str) -> i64 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
