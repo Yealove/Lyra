@@ -2149,6 +2149,10 @@ function vSettings() {
       <img src="icon.png" alt="好好听歌">
       <h2>好好听歌</h2>
       <div class="ver">版本 ${esc(state.version)}</div>
+      <div class="upd-row" style="display:flex;gap:10px;align-items:center;justify-content:center;flex-wrap:wrap;margin-top:12px">
+        <button class="btn sm" onclick="checkUpdate(true,this)">检查更新</button>
+        <span id="updResult"></span>
+      </div>
       <p>本地优先的桌面音乐播放器<br>播放与曲库管理完全离线可用，联网只用于可选的歌词、封面与元数据补全</p>
      </div>`;
 
@@ -2840,6 +2844,34 @@ async function copyText(s) {
     } catch { return false; }
   }
 }
+/* ================= 版本更新检测（GitHub Release，检测提醒，不自动安装） ================= */
+const openExternal = url => invoke('open_external', { url });
+let updChecking = false;
+async function checkUpdate(manual, btn) {
+  if (updChecking) return;
+  updChecking = true;
+  const row = document.getElementById('updResult');
+  const setRow = html => { if (row) row.innerHTML = html; };
+  if (btn) { btn.disabled = true; btn.dataset.old = btn.textContent; btn.textContent = '检查中…'; }
+  if (manual) setRow('<span class="muted">正在检查更新…</span>');
+  try {
+    const r = await invoke('check_update');
+    if (r.has_update) {
+      const v = 'v' + r.latest;
+      if (manual) setRow(`<span style="color:var(--ok)">发现新版本 ${esc(v)}（当前 v${esc(r.current)}）</span> <button class="btn sm" onclick="openExternal('${r.url}')">查看发布页</button>`);
+      // 静默发现新版：toast 提示 +「查看」跳转发布页（sticky 常驻，✕ 可关闭）
+      else toast(`发现新版本 ${v}`, 'info', { sticky: true, action: { label: '查看', fn: () => openExternal(r.url) } });
+    } else if (manual) setRow(`<span class="muted">已是最新版本（v${esc(r.current)}）</span>`);
+  } catch (e) {
+    // 手动：友好报错；静默：完全吞掉（离线等场景不打扰）
+    if (manual) setRow(`<span class="muted">检查失败：${esc(String(e))}</span>`);
+  }
+  // 无论成败都记录本次检查时间（24h 节流，含失败——离线时不反复请求）
+  localStorage.setItem('lyra.updateCheck', String(Date.now()));
+  if (btn) { btn.disabled = false; btn.textContent = btn.dataset.old || '检查更新'; }
+  updChecking = false;
+}
+
 function toast(msg, type, opts = {}) {
   const t = document.createElement('div');
   t.className = 'toast ' + (type || '');
@@ -2856,6 +2888,14 @@ function toast(msg, type, opts = {}) {
       setTimeout(() => (cp.textContent = '复制'), 1500);
     };
     t.appendChild(cp);
+  }
+  if (opts.action) {
+    // 附加操作按钮（如「查看」跳转）：点击执行后移除提示条
+    const ab = document.createElement('button');
+    ab.className = 'toast-btn';
+    ab.textContent = opts.action.label;
+    ab.onclick = () => { opts.action.fn(); t.remove(); };
+    t.appendChild(ab);
   }
   if (opts.sticky) {
     const x = document.createElement('button');
@@ -2956,6 +2996,11 @@ async function doRemoveRoot(path, btn) {
   applyFeatBtns(); // 播放条功能开关（默认关闭：倍速/睡眠/A-B 不占位）
   loadCrossfade();
   loadRg();
+  // 启动 3s 后静默检查更新（避开首屏加载；24h 节流，失败不重复请求）
+  setTimeout(() => {
+    const last = +(localStorage.getItem('lyra.updateCheck') || 0);
+    if (Date.now() - last > 864e5) checkUpdate(false);
+  }, 3000);
   async function loadRg() { try { RG_MODE = await invoke('get_rg_mode'); } catch (e) { } }
   listen('scan-done', async e => {
     const { changed, removed, auto } = e.payload;

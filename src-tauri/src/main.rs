@@ -695,6 +695,51 @@ fn open_external(url: String) {
     let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
 }
 
+/// 版本三段数值提取（"v1.2.3-beta" → [1,2,3]；解析不全返回空）
+fn ver_parts(s: &str) -> Vec<u64> {
+    s.split(|c: char| !c.is_ascii_digit() && c != '.')
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .filter_map(|x| x.parse().ok())
+        .collect()
+}
+
+/// a 是否严格大于 b（任一侧解析不出三段 → false，更新检测绝不误报）
+fn newer_ver(a: &str, b: &str) -> bool {
+    let (pa, pb) = (ver_parts(a), ver_parts(b));
+    pa.len() == 3 && pb.len() == 3 && pa > pb
+}
+
+/// 版本更新检测：查 GitHub 最新正式版（releases/latest 自动排除 prerelease）
+/// 与当前版本比对。网络失败返回 Err——手动检查时前端提示，静默检查吞掉。
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<serde_json::Value, String> {
+    let cur = app.package_info().version.to_string();
+    let cli = reqwest::Client::builder()
+        .user_agent("Lyra-UpdateCheck") // GitHub API 强制要求 User-Agent，否则 403
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let body = cli
+        .get("https://api.github.com/repos/Yealove/Lyra/releases/latest")
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败: {e}"))?
+        .text()
+        .await
+        .map_err(|e| e.to_string())?;
+    let resp: serde_json::Value = body.parse().map_err(|e| format!("响应解析失败: {e}"))?;
+    let tag = resp["tag_name"].as_str().unwrap_or("").trim().trim_start_matches('v').to_string();
+    Ok(serde_json::json!({
+        "has_update": newer_ver(&tag, &cur),
+        "current": cur,
+        "latest": tag,
+        "url": resp["html_url"].as_str().unwrap_or(""),
+        "published_at": resp["published_at"].as_str().unwrap_or(""),
+    }))
+}
+
 #[tauri::command]
 fn get_keys(app: AppHandle) -> serde_json::Value {
     // 未配置过任何 key 时 config 里无 keys 节 → 返回空对象而非 Null（前端 null[id] 会炸）
@@ -3272,6 +3317,7 @@ fn main() {
             queue_list,
             artist_cached_imgs,
             open_external,
+            check_update,
             get_keys,
             set_key,
             get_config,
