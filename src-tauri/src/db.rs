@@ -452,7 +452,7 @@ CREATE INDEX IF NOT EXISTS idx_history_time ON play_history(played_at DESC);
 "#;
 
 const TRACK_COLS: &str =
-    "id,title,artist,album,album_key,album_artist,disc,track_no,year,genre,duration,cover,source,(lyrics_embed IS NOT NULL AND lyrics_embed!='' OR lyrics_online IS NOT NULL AND lyrics_online!='' OR has_lrc_file=1) AS has_lyrics,has_tr,liked,file_path,hidden,(SELECT COUNT(*) FROM play_history h WHERE h.track_id=tracks.id) AS plays";
+    "t.id,t.title,t.artist,t.album,t.album_key,t.album_artist,t.disc,t.track_no,t.year,t.genre,t.duration,t.cover,t.source,(t.lyrics_embed IS NOT NULL AND t.lyrics_embed!='' OR t.lyrics_online IS NOT NULL AND t.lyrics_online!='' OR t.has_lrc_file=1) AS has_lyrics,t.has_tr,t.liked,t.file_path,t.hidden,(SELECT COUNT(*) FROM play_history h WHERE h.track_id=t.id) AS plays";
 
 fn row_to_track(r: &rusqlite::Row) -> rusqlite::Result<Track> {
     Ok(Track {
@@ -479,7 +479,7 @@ fn row_to_track(r: &rusqlite::Row) -> rusqlite::Result<Track> {
 }
 
 pub fn all_tracks(conn: &Connection) -> Vec<Track> {
-    let sql = format!("SELECT {} FROM tracks WHERE hidden=0 ORDER BY artist,album,disc,track_no,id", TRACK_COLS);
+    let sql = format!("SELECT {} FROM tracks t WHERE t.hidden=0 ORDER BY t.artist,t.album,t.disc,t.track_no,t.id", TRACK_COLS);
     let res: Result<Vec<Track>, rusqlite::Error> = conn
         .prepare(&sql)
         .and_then(|mut stmt| {
@@ -502,7 +502,7 @@ pub fn tracks_by_ids(conn: &Connection, ids: &[i64]) -> Vec<Track> {
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT {} FROM tracks WHERE id IN ({})",
+        "SELECT {} FROM tracks t WHERE t.id IN ({})",
         TRACK_COLS, list
     );
     conn.prepare(&sql)
@@ -581,9 +581,7 @@ pub fn playlist_tracks(conn: &Connection, pid: i64) -> Vec<Track> {
     let sql = format!(
         "SELECT {} FROM tracks t JOIN playlist_tracks pt ON pt.track_id=t.id
          WHERE pt.playlist_id=?1 AND t.hidden=0 ORDER BY pt.position",
-        TRACK_COLS.replace("id,", "t.id,")
-            .replace(",file_path", ",t.file_path")
-            .replace(",hidden", ",t.hidden")
+        TRACK_COLS
     );
     conn.prepare(&sql)
         .unwrap()
@@ -732,7 +730,7 @@ pub fn record_play(conn: &Connection, track_id: i64) {
 
 /// 已隐藏曲目（cue 整轨等长音频）：只在「设置 → 已隐藏」里展示，按时长降序
 pub fn hidden_tracks(conn: &Connection) -> Vec<Track> {
-    let sql = format!("SELECT {} FROM tracks WHERE hidden=1 ORDER BY duration DESC", TRACK_COLS);
+    let sql = format!("SELECT {} FROM tracks t WHERE t.hidden=1 ORDER BY t.duration DESC", TRACK_COLS);
     let res: Result<Vec<Track>, rusqlite::Error> = conn
         .prepare(&sql)
         .and_then(|mut stmt| {
@@ -754,16 +752,16 @@ pub fn set_hidden(conn: &Connection, track_id: i64, hidden: bool) -> rusqlite::R
 pub fn smart_tracks(conn: &Connection, kind: &str) -> Vec<Track> {
     let sql = match kind {
         "favorites" => format!(
-            "SELECT {} FROM tracks WHERE liked=1 AND hidden=0 ORDER BY id DESC LIMIT 500",
+            "SELECT {} FROM tracks t WHERE t.liked=1 AND t.hidden=0 ORDER BY t.id DESC LIMIT 500",
             TRACK_COLS
         ),
         "recent" => format!(
-            "SELECT {c} FROM (SELECT track_id, MAX(played_at) AS m FROM play_history GROUP BY track_id ORDER BY m DESC LIMIT 100) h JOIN tracks t ON t.id=h.track_id AND t.hidden=0 ORDER BY h.m DESC",
-            c = TRACK_COLS.replace("id,", "t.id,").replace(",file_path", ",t.file_path").replace(",hidden", ",t.hidden")
+            "SELECT {} FROM (SELECT track_id, MAX(played_at) AS m FROM play_history GROUP BY track_id ORDER BY m DESC LIMIT 100) h JOIN tracks t ON t.id=h.track_id AND t.hidden=0 ORDER BY h.m DESC",
+            TRACK_COLS
         ),
         _ => format!(
-            "SELECT {c} FROM (SELECT track_id, COUNT(*) AS n, MAX(played_at) AS m FROM play_history GROUP BY track_id ORDER BY n DESC, m DESC LIMIT 100) h JOIN tracks t ON t.id=h.track_id AND t.hidden=0 ORDER BY h.n DESC, h.m DESC",
-            c = TRACK_COLS.replace("id,", "t.id,").replace(",file_path", ",t.file_path").replace(",hidden", ",t.hidden")
+            "SELECT {} FROM (SELECT track_id, COUNT(*) AS n, MAX(played_at) AS m FROM play_history GROUP BY track_id ORDER BY n DESC, m DESC LIMIT 100) h JOIN tracks t ON t.id=h.track_id AND t.hidden=0 ORDER BY h.n DESC, h.m DESC",
+            TRACK_COLS
         ),
     };
     let res: Result<Vec<Track>, rusqlite::Error> = conn
