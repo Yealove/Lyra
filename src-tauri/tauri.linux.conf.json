@@ -1,7 +1,5 @@
 {
-  "bundle": {
-    // Linux：deb 包名（Package 字段）强制 ASCII，productName 覆盖为 Lyra
-    // （桌面菜单显示名也随之是 Lyra；macOS/Windows 不受影响，仍显示「好好听歌」）
-    "productName": "Lyra"
-  }
+  // Linux：deb 包名（Package 字段）强制 ASCII，productName 覆盖为 Lyra
+  // （桌面菜单显示名也随之是 Lyra；macOS/Windows 不受影响，仍显示「好好听歌」）
+  "productName": "Lyra"
 }
