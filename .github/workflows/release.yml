@@ -64,6 +64,6 @@ jobs:
           args: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
           # productName=好好听歌（中文）时 GitHub 会剥离资产名中的非 ASCII 字符
           # （v0.1.1/v0.1.4 实测丢前缀），用官方 pattern 强制 ASCII 命名：
-          # [ext] 自带前导点；[_setup] 仅 NSIS 生效；macOS 更新包 .app.tar.gz 的
-          # [arch] 按构建 target 精确取 aarch64/x64
-          releaseAssetNamePattern: 'Lyra_[version]_[arch][_setup][ext]'
+          # [ext] 自带前导点；[_setup] 仅 NSIS 生效。
+          # 注意：@v0 里参数名是 assetNamePattern，releaseAssetNamePattern 是 dev 分支的新名字
+          assetNamePattern: 'Lyra_[version]_[arch][_setup][ext]'
