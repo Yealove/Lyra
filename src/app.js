@@ -28,7 +28,7 @@ const fmt = s => { s = Math.max(0, Math.round(s || 0)); return (s / 60 | 0) + ':
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const hue = s => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
 const cstyle = t => `background:linear-gradient(135deg,hsl(${hue(t)} 46% 34%),hsl(${(hue(t) + 55) % 360} 52% 17%))`;
-const SRC = { tag: ['本地标签', 'b-tag'], cleaned: ['已清洗', 'b-clean'], guessed: ['推断', 'b-guess'], online: ['在线', 'b-online'], manual: ['手动', 'b-clean'] };
+const SRC = { tag: ['本地标签', 'b-tag'], cleaned: ['已清洗', 'b-clean'], guessed: ['推断', 'b-guess'], online: ['补全', 'b-online'], manual: ['手动', 'b-clean'] };
 const sbadge = s => { const [n, c] = SRC[s] || SRC.tag; return `<span class="badge ${c}">${n}</span>`; };
 
 function cover(coverPath, title, size, radius) {
