@@ -62,33 +62,8 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
-
-  # productName 为中文（好好听歌）时 tauri-action 上传资产会丢前缀（v0.1.1 实测），
-  # 统一改为 Lyra 前缀重新上传；Linux 已覆盖 ASCII productName，本 job 对其无操作
-  fix-assets:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    steps:
-      - name: 修正资产名
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          REPO="${GITHUB_REPOSITORY}"
-          mkdir -p assets
-          gh release download "$TAG" --repo "$REPO" --dir assets --clobber --pattern "_*" --pattern "好好听歌*"
-          for f in assets/_* assets/好好听歌*; do
-            [ -e "$f" ] || continue
-            base="$(basename "$f")"
-            case "$base" in
-              _*) new="Lyra${base}" ;;
-              好好听歌*) new="Lyra${base#好好听歌}" ;;
-              *) continue ;;
-            esac
-            mv "$f" "assets/$new"
-            gh release upload "$TAG" --repo "$REPO" --clobber "assets/$new"
-            gh release delete-asset "$base" --repo "$REPO" --yes
-          done
-          echo "剩余资产："
-          gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name'
+          # productName=好好听歌（中文）时 GitHub 会剥离资产名中的非 ASCII 字符
+          # （v0.1.1/v0.1.4 实测丢前缀），用官方 pattern 强制 ASCII 命名：
+          # [ext] 自带前导点；[_setup] 仅 NSIS 生效；macOS 更新包 .app.tar.gz 的
+          # [arch] 按构建 target 精确取 aarch64/x64
+          releaseAssetNamePattern: 'Lyra_[version]_[arch][_setup][ext]'
