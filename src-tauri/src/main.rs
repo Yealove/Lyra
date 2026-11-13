@@ -2983,14 +2983,24 @@ fn start_now_playing(app: &AppHandle) {
     let _ = NP_TX.set(tx);
 }
 
+/// 唤回主窗口（托盘菜单/单击托盘；后台播放「关窗=隐藏」后的入口，macOS 亦可点 Dock）
+fn show_main_window(app: &AppHandle) {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(|window, event| {
-            // macOS 后台播放（设置 → 功能开关，默认关）：开启时点红色关闭钮 = 隐藏窗口继续播放
-            // （Tauri v2 默认窗口全关即退出，与 AppKit 原生惯例不同）。拦截 CloseRequested 改 hide，
-            // WebView 状态全保留，重开秒回。⌘Q / 托盘退出走 terminate 路径不受影响。
-            #[cfg(target_os = "macos")]
+            // 后台播放（设置 → 功能开关，默认关）：开启时点关闭钮 = 隐藏窗口继续播放
+            // （Tauri v2 默认窗口全关即退出，Win/macOS/Linux 桌面惯例不同）。拦截 CloseRequested
+            // 改 hide，WebView 状态全保留，重开秒回。唤回：macOS 点 Dock 图标 / 各平台单击托盘
+            // 或托盘菜单「显示主窗口」；退出：托盘菜单「退出」走 app.exit 不受拦截影响。
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if read_cfg(window.app_handle())["bgplay"].as_bool().unwrap_or(false) {
                     api.prevent_close();
@@ -3097,25 +3107,39 @@ fn main() {
             app.manage(player);
             // —— souvlaki：媒体键 + Now Playing（设计文档 7.1，专用线程）——
             start_now_playing(app.handle());
-            // —— 托盘：播放/暂停/上一首/下一首/退出（设计文档 7.2）——
+            // —— 托盘：显示主窗口/播放/暂停/上一首/下一首/退出（设计文档 7.2）——
             {
                 use tauri::menu::{Menu, MenuItem};
                 use tauri::tray::TrayIconBuilder;
+                let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
                 let play = MenuItem::with_id(app, "play", "播放/暂停", true, None::<&str>)?;
                 let prev = MenuItem::with_id(app, "prev", "上一首", true, None::<&str>)?;
                 let next = MenuItem::with_id(app, "next", "下一首", true, None::<&str>)?;
                 let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-                let menu = Menu::with_items(app, &[&prev, &play, &next, &quit])?;
+                let menu = Menu::with_items(app, &[&show, &prev, &play, &next, &quit])?;
                 TrayIconBuilder::with_id("lyra-tray")
                     .icon(app.default_window_icon().cloned().ok_or("无图标")?)
                     .tooltip("好好听歌")
                     .menu(&menu)
+                    // 左键单击托盘 = 唤回主窗口（Windows/Linux 关窗隐藏后的主要入口），菜单走右键
+                    .menu_on_left_click(false)
                     .on_menu_event(|app, ev| match ev.id().as_ref() {
+                        "show" => show_main_window(app),
                         "play" => media_action(app, souvlaki::MediaControlEvent::Toggle),
                         "prev" => media_action(app, souvlaki::MediaControlEvent::Previous),
                         "next" => media_action(app, souvlaki::MediaControlEvent::Next),
                         "quit" => app.exit(0),
                         _ => {}
+                    })
+                    .on_tray_icon_event(|tray, ev| {
+                        if let tauri::tray::TrayIconEvent::Click {
+                            button: tauri::tray::MouseButton::Left,
+                            button_state: tauri::tray::MouseButtonState::Up,
+                            ..
+                        } = ev
+                        {
+                            show_main_window(tray.app_handle());
+                        }
                     })
                     .build(app)?;
             }
