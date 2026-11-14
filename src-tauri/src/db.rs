@@ -64,47 +64,57 @@ pub fn covers_dir(app: &AppHandle) -> PathBuf {
     d
 }
 
-pub fn open(path: &PathBuf) -> Connection {    let conn = Connection::open(path).expect("open db");
+pub fn open(path: &PathBuf) -> Result<Connection, String> {
+    // 全新库（文件不存在）无需迁移前快照——没有可丢的数据，SCHEMA 直接建最新结构
+    let is_new = !path.exists();
+    let conn = Connection::open(path).map_err(|e| format!("打开数据库失败: {e}"))?;
     conn.pragma_update(None, "journal_mode", "WAL").ok();
     conn.pragma_update(None, "foreign_keys", "ON").ok();
-    conn.execute_batch(SCHEMA).expect("init schema");
-    // 轻量迁移：老库补列（已存在则忽略）
-    conn.execute("ALTER TABLE tracks ADD COLUMN lyrics_tr TEXT", []).ok();
-    conn.execute("ALTER TABLE tracks ADD COLUMN enrichment_status TEXT NOT NULL DEFAULT 'none'", []).ok();
-    conn.execute("ALTER TABLE tracks ADD COLUMN online_meta TEXT", []).ok();
-    conn.execute("ALTER TABLE tracks ADD COLUMN liked INTEGER NOT NULL DEFAULT 0", []).ok();
+    conn.execute_batch(SCHEMA).map_err(|e| format!("初始化表结构失败: {e}"))?;
+    // 存量补列（历史平铺迁移，幂等）：错误窄化，不再 .ok() 全吞
+    legacy_baseline(&conn)?;
+    // 版本化增量迁移（v2 封面策略收编于此，新迁移从 v3 起登记）
+    run_migrations(&conn, if is_new { None } else { Some(path) })?;
+    // 专辑键归并（幂等）：修复历史数据里因标签残缺/多艺人变体造成的同名专辑分裂
+    normalize_album_keys(&conn);
+    // 专辑封面归一（幂等）：封面是专辑级资产，保证同专辑播放时封面一致
+    unify_album_covers(&conn);
+    Ok(conn)
+}
+
+/// 幂等补列：仅忽略 "duplicate column name"（列已存在的正常情况），
+/// 其余错误（磁盘满/库损坏/语法错误）上抛——旧实现 .ok() 全吞导致
+/// 迁移失败后带病运行，缺列问题延迟到运行深处才爆炸
+fn add_column(conn: &Connection, table: &str, col: &str, def: &str) -> Result<bool, String> {
+    match conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {col} {def}"), []) {
+        Ok(_) => Ok(true),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+            if msg.contains("duplicate column name") => Ok(false),
+        Err(e) => Err(format!("补列 {table}.{col} 失败: {e}")),
+    }
+}
+
+/// v3 之前的存量迁移：把任意历史形态的老库（user_version 0/2，列集合不确定）
+/// 补齐到"v3 前夜"。幂等：列已存在自动跳过。加列语义注释从旧 open() 原样收编
+fn legacy_baseline(conn: &Connection) -> Result<(), String> {
+    add_column(conn, "tracks", "lyrics_tr", "TEXT")?;
+    add_column(conn, "tracks", "enrichment_status", "TEXT NOT NULL DEFAULT 'none'")?;
+    add_column(conn, "tracks", "online_meta", "TEXT")?;
+    add_column(conn, "tracks", "liked", "INTEGER NOT NULL DEFAULT 0")?;
     // ReplayGain：NULL=未解析，0.0=已解析无标签
-    conn.execute("ALTER TABLE tracks ADD COLUMN rg_track REAL", []).ok();
-    conn.execute("ALTER TABLE tracks ADD COLUMN rg_album REAL", []).ok();
+    add_column(conn, "tracks", "rg_track", "REAL")?;
+    add_column(conn, "tracks", "rg_album", "REAL")?;
     // 样本峰值（RG 分析产出，写回标签时用）
-    conn.execute("ALTER TABLE tracks ADD COLUMN rg_peak REAL", []).ok();
+    add_column(conn, "tracks", "rg_peak", "REAL")?;
     // 封面来源标记：manual（在线应用）> dir（目录图）> embed（内嵌）> artist（歌手图兜底）。
     // 归一选代表与扫描覆盖保护（manual 不被重扫覆盖）都依赖它
-    conn.execute("ALTER TABLE tracks ADD COLUMN cover_src TEXT", []).ok();
-    // 封面策略版本（PRAGMA user_version）：2=目录图优先+中文命名放宽+专辑归一。
-    // 存量 embed 标记可能来自旧版探测逻辑（未认出中文命名目录图），清空触发一次
-    // 全量重扫升级；manual 是用户手动选择，保持不动
-    {
-        let v: i64 = conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap_or(0);
-        if v < 2 {
-            let _ = conn.execute(
-                "UPDATE tracks SET cover_src=NULL WHERE cover_src IS NOT NULL AND cover_src != 'manual'",
-                [],
-            );
-            conn.pragma_update(None, "user_version", 2).ok();
-        }
-    }
+    add_column(conn, "tracks", "cover_src", "TEXT")?;
     // 隐藏曲目（cue 整轨等长音频）：所有列表不展示，设置里可查看/恢复
-    conn.execute("ALTER TABLE tracks ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0", []).ok();
+    add_column(conn, "tracks", "hidden", "INTEGER NOT NULL DEFAULT 0")?;
     // 歌单自定义封面（本地图片或网络图入库后的路径）；NULL=用前 4 首曲目拼贴
-    conn.execute("ALTER TABLE playlists ADD COLUMN cover TEXT", []).ok();
+    add_column(conn, "playlists", "cover", "TEXT")?;
     // 歌词含翻译标记（列表"译"徽标）：首次加列时回填全库
-    if conn
-        .execute("ALTER TABLE tracks ADD COLUMN has_tr INTEGER NOT NULL DEFAULT 0", [])
-        .is_ok()
-    {
+    if add_column(conn, "tracks", "has_tr", "INTEGER NOT NULL DEFAULT 0")? {
         // 立即覆盖最常见来源：自定义源翻译缓存（纯 SQL，瞬时）
         let _ = conn.execute(
             "UPDATE tracks SET has_tr=1 WHERE lyrics_tr IS NOT NULL AND lyrics_tr!=''",
@@ -113,11 +123,113 @@ pub fn open(path: &PathBuf) -> Connection {    let conn = Connection::open(path)
         // 其余来源（.zh.lrc / 内嵌 A2 / 外部 .lrc 双语）由 setup 的
         // backfill_has_tr 幂等回填（含通知前端刷新）
     }
-    // 专辑键归并（幂等）：修复历史数据里因标签残缺/多艺人变体造成的同名专辑分裂
-    normalize_album_keys(&conn);
-    // 专辑封面归一（幂等）：封面是专辑级资产，保证同专辑播放时封面一致
-    unify_album_covers(&conn);
-    conn
+    Ok(())
+}
+
+/// 版本化迁移条目 (版本号, 描述, SQL)。编写规范见 docs/数据库迁移改造.md：
+/// 只增不改（已发布条目永不修改）、版本只前进、每条在单事务内原子执行
+type Migration = (i64, &'static str, &'static str);
+
+/// 增量迁移登记处。v2 已被"封面策略"占用（历史孤例，收编在 run_migrations_with 内），
+/// 新迁移从 v3 起编号；建新表永远 CREATE TABLE IF NOT EXISTS（可同时进 SCHEMA，双写不冲突）
+const MIGRATIONS: &[Migration] = &[
+    // (3, "在线歌单（B站）基础表", "CREATE TABLE IF NOT EXISTS bili_playlists(...); ..."),
+];
+
+/// 当前程序支持的库结构版本（有迁移条目时 = 末条版本号）
+const DB_VERSION: i64 = 2;
+
+fn run_migrations(conn: &Connection, db_path: Option<&PathBuf>) -> Result<(), String> {
+    run_migrations_with(conn, db_path.map(|p| p as &std::path::Path), MIGRATIONS, DB_VERSION)
+}
+
+/// 版本化迁移执行器：
+/// - 降级保护：库版本高于程序支持 → 拒绝打开（防旧版程序写坏新库）
+/// - v < 目标版本时先做迁移前快照（VACUUM INTO，保留最近一份）
+/// - v2 封面策略 + MIGRATIONS 依序执行，每条单事务原子（DDL 与 user_version 同事务，
+///   中断不会出现"结构改了版本没记"或反之；条目间独立提交，重试只补剩余）
+/// - 测试通过注入 extra 迁移与目标版本验证执行器行为（migrate_tests）
+fn run_migrations_with(
+    conn: &Connection,
+    db_path: Option<&std::path::Path>,
+    mig: &[Migration],
+    db_ver: i64,
+) -> Result<(), String> {
+    let mut v: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|e| format!("读取 user_version 失败: {e}"))?;
+    if v > db_ver {
+        return Err(format!(
+            "数据库版本（v{v}）高于当前程序支持的版本（v{db_ver}），\n\
+             可能正在用旧版程序打开新版数据。\n\
+             请先升级好好听歌后再启动，以免数据损坏。"
+        ));
+    }
+    if v < db_ver {
+        if let Some(p) = db_path {
+            snapshot_before_migration(conn, p, v)?;
+        }
+    }
+    // v2 封面策略（历史孤例收编）：存量 embed 标记可能来自旧版探测逻辑
+    // （未认出中文命名目录图），清空触发一次全量重扫升级；manual 是用户手动选择，保持不动
+    if v < 2 {
+        let tx = conn.unchecked_transaction().map_err(mig_tx_err)?;
+        tx.execute(
+            "UPDATE tracks SET cover_src=NULL WHERE cover_src IS NOT NULL AND cover_src != 'manual'",
+            [],
+        )
+        .map_err(|e| format!("迁移 v2 失败: {e}"))?;
+        tx.pragma_update(None, "user_version", 2)
+            .map_err(|e| format!("迁移 v2 写版本失败: {e}"))?;
+        tx.commit().map_err(|e| format!("迁移 v2 提交失败: {e}"))?;
+        v = 2;
+        eprintln!("[db] 迁移 v2：封面策略（清空非 manual 的 cover_src）");
+    }
+    for (ver, desc, sql) in mig {
+        if *ver <= v {
+            continue;
+        }
+        let tx = conn.unchecked_transaction().map_err(mig_tx_err)?;
+        tx.execute_batch(sql)
+            .map_err(|e| format!("迁移 v{ver}（{desc}）失败: {e}"))?;
+        tx.pragma_update(None, "user_version", *ver)
+            .map_err(|e| format!("迁移 v{ver} 写版本失败: {e}"))?;
+        tx.commit().map_err(|e| format!("迁移 v{ver} 提交失败: {e}"))?;
+        v = *ver;
+        eprintln!("[db] 迁移升级至 v{ver}：{desc}");
+    }
+    debug_assert_eq!(v, db_ver, "DB_VERSION 应与 MIGRATIONS 末条版本一致");
+    Ok(())
+}
+
+fn mig_tx_err(e: rusqlite::Error) -> String {
+    format!("开启迁移事务失败: {e}")
+}
+
+/// 迁移前快照：VACUUM INTO 产出一致性副本（WAL 安全，区别于直接 copy 文件）。
+/// 文件名带毫秒时间戳（并发 open 不互踩），保留最近一份（清理更早的 pre-migration-*）；
+/// 恢复方式：退出应用后用它替换 lyra.db（不入自动备份 zip 索引，防误恢复旧结构）
+fn snapshot_before_migration(conn: &Connection, db_path: &std::path::Path, from: i64) -> Result<(), String> {
+    let dir = db_path.with_file_name("backups");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建备份目录失败: {e}"))?;
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let dst = dir.join(format!("pre-migration-from-v{from}-{ms}.db"));
+    conn.execute("VACUUM INTO ?1", [dst.to_string_lossy().into_owned()])
+        .map_err(|e| format!("迁移前快照失败: {e}"))?;
+    // 只保留最新一份（并发极端下最坏丢快照，不丢数据，可接受）
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with("pre-migration-") && name.ends_with(".db") && e.path() != dst {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    eprintln!("[db] 迁移前快照已保存: {}", dst.display());
+    Ok(())
 }
 
 /// has_tr 全库回填：对有歌词但未标记的曲目逐曲完整判定（.zh.lrc / A2 双行等）。
@@ -1054,5 +1166,195 @@ mod tests {
         assert_eq!(keys(&conn), vec!["歌手|新专辑"]);
         refresh_album_key(&conn, 1).unwrap();
         assert_eq!(keys(&conn), vec!["歌手|新专辑"], "refresh 应与 update_fields 一致");
+    }
+}
+
+#[cfg(test)]
+mod migrate_tests {
+    use super::*;
+
+    /// 独立临时目录（按测试标签隔离，backups/ 快照随之隔离，消除并发竞争）
+    fn tmp_db(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lyra-mig-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("lyra.db")
+    }
+
+    fn cleanup(p: &PathBuf) {
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    /// backups/ 下是否存在指定起始版本的快照（文件名带时间戳，前缀匹配）
+    fn snapshot_exists(p: &PathBuf, from: &str) -> bool {
+        let dir = p.with_file_name("backups");
+        std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.flatten().any(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with(&format!("pre-migration-from-{from}-"))
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    fn user_version(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()
+    }
+
+    fn has_col(conn: &Connection, table: &str, col: &str) -> bool {
+        conn.prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .any(|c| c.unwrap() == col)
+    }
+
+    fn table_exists(conn: &Connection, t: &str) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+            [t],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
+
+    #[test]
+    fn fresh_db_reaches_current_version() {
+        let p = tmp_db("fresh");
+        let conn = open(&p).unwrap();
+        assert_eq!(user_version(&conn), DB_VERSION);
+        assert!(has_col(&conn, "tracks", "has_tr"));
+        // 全新库不做快照（无数据可丢）
+        assert!(!snapshot_exists(&p, "v0"), "新库不应产生迁移前快照");
+        cleanup(&p);
+    }
+
+    /// v0 老库（跳级升级）：baseline 补齐历史列 + v2 封面策略执行 + 迁移前快照落盘
+    #[test]
+    fn v0_legacy_db_upgrades_with_baseline_and_v2() {
+        let p = tmp_db("v0");
+        {
+            let conn = open(&p).unwrap();
+            conn.execute_batch("PRAGMA user_version=0").unwrap();
+            conn.execute(
+                "INSERT INTO tracks(file_path,title,artist,album,album_key,cover_src)
+                 VALUES('/x.mp3','t','a','al','k','manual')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO tracks(file_path,title,artist,album,album_key,cover_src)
+                 VALUES('/y.mp3','t','a','al','k','embed')",
+                [],
+            ).unwrap();
+        }
+        let conn = open(&p).unwrap();
+        assert_eq!(user_version(&conn), DB_VERSION);
+        // v2 策略生效：manual 保留、embed 清空
+        let (m, e): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT SUM(cover_src='manual'),
+                        (SELECT cover_src FROM tracks WHERE file_path='/y.mp3') FROM tracks",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(m, 1, "manual 应保留");
+        assert!(e.is_none(), "embed 应被清空");
+        assert!(has_col(&conn, "tracks", "hidden"), "baseline 应补齐历史列");
+        // 迁移前快照落盘
+        assert!(snapshot_exists(&p, "v0"), "应有 v0 迁移前快照");
+        cleanup(&p);
+    }
+
+    /// v2 库（当前线上形态）：不再重跑 v2 清空
+    #[test]
+    fn v2_db_skips_cover_reset() {
+        let p = tmp_db("v2");
+        {
+            let conn = open(&p).unwrap();
+            conn.execute_batch("PRAGMA user_version=2").unwrap();
+            conn.execute(
+                "INSERT INTO tracks(file_path,title,artist,album,album_key,cover_src)
+                 VALUES('/z.mp3','t','a','al','k','embed')",
+                [],
+            ).unwrap();
+        }
+        let conn = open(&p).unwrap();
+        let c: Option<String> = conn
+            .query_row("SELECT cover_src FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(c.as_deref(), Some("embed"), "v>=2 不应重跑封面清空");
+        assert_eq!(user_version(&conn), DB_VERSION);
+        cleanup(&p);
+    }
+
+    /// 降级保护：库版本高于程序支持 → 拒绝打开
+    #[test]
+    fn downgrade_rejected() {
+        let p = tmp_db("down");
+        {
+            let conn = open(&p).unwrap();
+            conn.execute_batch(&format!("PRAGMA user_version={}", DB_VERSION + 1)).unwrap();
+        }
+        let err = open(&p).unwrap_err();
+        assert!(err.contains("升级"), "文案应引导升级：{err}");
+        cleanup(&p);
+    }
+
+    /// 注入迁移（模拟未来版本）：坏条目回滚自身且版本停在上一条；好条目已提交可续跑
+    #[test]
+    fn injected_migration_atomic_and_versioned() {
+        let p = tmp_db("inject");
+        let conn = open(&p).unwrap();
+        conn.execute_batch("PRAGMA user_version=2").unwrap();
+        let bad: &[Migration] = &[
+            (3, "好迁移", "CREATE TABLE IF NOT EXISTS mig_ok(a INTEGER)"),
+            (4, "坏迁移", "THIS IS NOT SQL"),
+            (5, "不该执行", "CREATE TABLE IF NOT EXISTS mig_never(a INTEGER)"),
+        ];
+        let err = run_migrations_with(&conn, Some(&p), bad, 5).unwrap_err();
+        assert!(err.contains("v4"), "错误应定位到坏条目：{err}");
+        // v3 已独立提交（表存在、版本推进）；v4 回滚自身、v5 未执行
+        assert_eq!(user_version(&conn), 3);
+        assert!(table_exists(&conn, "mig_ok"));
+        assert!(!table_exists(&conn, "mig_never"));
+        // 重试：v3 跳过，v4 仍失败，行为确定
+        assert!(run_migrations_with(&conn, Some(&p), bad, 5).is_err());
+        assert_eq!(user_version(&conn), 3);
+        cleanup(&p);
+    }
+
+    /// duplicate column 窄化：重复加列幂等返回 false，不再吞其他错误
+    #[test]
+    fn duplicate_column_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        assert!(add_column(&conn, "tracks", "extra_test_col", "INTEGER").unwrap());
+        assert!(!add_column(&conn, "tracks", "extra_test_col", "INTEGER").unwrap());
+        // 不存在的表 → 真错误上抛（不再被吞）
+        assert!(add_column(&conn, "no_such_table", "c", "INTEGER").is_err());
+    }
+
+    /// 快照覆盖：重复迁移场景只保留最近一份快照，二次迁移不报错
+    #[test]
+    fn snapshot_keeps_latest_only() {
+        let p = tmp_db("snap");
+        {
+            let conn = open(&p).unwrap();
+            conn.execute_batch("PRAGMA user_version=0").unwrap();
+        }
+        let conn = open(&p).unwrap(); // 二次 open 触发快照（时间戳新文件，清理旧的）
+        assert_eq!(user_version(&conn), DB_VERSION);
+        let dir = p.with_file_name("backups");
+        let n = std::fs::read_dir(&dir)
+            .map(|rd| rd.flatten().filter(|e| {
+                e.file_name().to_string_lossy().starts_with("pre-migration-")
+            }).count())
+            .unwrap_or(0);
+        assert_eq!(n, 1, "应只保留一份迁移前快照");
+        assert!(snapshot_exists(&p, "v0"));
+        cleanup(&p);
     }
 }

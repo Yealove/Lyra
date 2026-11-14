@@ -217,7 +217,7 @@ fn scan_sync(app: &AppHandle, root: &std::path::Path, quiet: bool) -> Result<(us
     let covers = db::covers_dir(app);
     let app2 = app.clone();
     let root2 = root.to_path_buf();
-    let mut conn = db::open(&db_path);
+    let mut conn = db::open(&db_path)?;
     let (done, changed) = scanner::scan(&mut conn, &root2, &covers, &app2, true, quiet);
     let gone = scanner::prune(&conn, &root2);
     // 新写入/更新过的曲目按「目录 + 专辑名」再归并一次，避免标签残缺导致同名专辑分裂
@@ -3033,7 +3033,24 @@ fn main() {
             }
         })
         .setup(|app| {
-            let conn = db::open(&db::db_path(app.handle()));
+            let conn = match db::open(&db::db_path(app.handle())) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[db] 初始化/升级失败: {e}");
+                    // 原生错误弹窗（关闭对话框即退出；60s 兜底防对话框系统异常）
+                    use tauri_plugin_dialog::DialogExt;
+                    app.dialog()
+                        .message(format!("{e}\n\n应用即将退出。库文件未改动（或已留迁移前快照于 backups/）。"))
+                        .title("数据库初始化失败")
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                        .show(|_| std::process::exit(1));
+                    std::thread::spawn(|| {
+                        std::thread::sleep(std::time::Duration::from_secs(60));
+                        std::process::exit(1);
+                    });
+                    return Err(format!("数据库初始化失败: {e}").into());
+                }
+            };
             // 歌手图兜底（幂等）：启动归一后仍整组无封面的专辑，用歌手目录图填充
             db::fill_artist_covers(&conn, &db::covers_dir(app.handle()));
             // has_tr 后台回填（幂等：只处理未标记行）：完成 emit 通知前端刷新，
